@@ -1,6 +1,5 @@
 package org.osservatorionessuno.bugbane
 
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -9,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.viewModels
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,40 +19,48 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import org.osservatorionessuno.bugbane.components.SlideshowPage
 import org.osservatorionessuno.bugbane.ui.theme.Theme
-import org.osservatorionessuno.bugbane.utils.AdbManager
 import org.osservatorionessuno.bugbane.utils.AppState
-import org.osservatorionessuno.bugbane.utils.ConfigurationManager
 import org.osservatorionessuno.bugbane.utils.ConfigurationViewModel
-import org.osservatorionessuno.bugbane.utils.SlideshowManager
+import org.osservatorionessuno.bugbane.utils.ViewModelFactory
+
+const val INTENT_EXIT_BACKPRESS = "EXIT_ON_BACK"
+private const val TAG = "SlideshowActivity"
 
 class SlideshowActivity : ComponentActivity() {
-    private val viewModel = AdbManager(application)
-    private val configViewModel: ConfigurationViewModel by viewModels()
+
+    private val configViewModel by lazy {
+        ViewModelFactory.get(application)
+    }
+
+    private var shouldExitOnBackPress: Boolean = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+        // During first-time onboarding and by default, a backpress quits the app,
+        // but re-launching the slideshow from another screen (ScanScreen) should not
+        shouldExitOnBackPress = intent.getBooleanExtra(INTENT_EXIT_BACKPRESS, shouldExitOnBackPress)
+
         // Exit application when back is pressed during slideshow
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Exit the application
-                finishAffinity()
+                if (shouldExitOnBackPress) {
+                    // Exit the application
+                    finishAffinity()
+                } else {
+                    // Default back button behaviour
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
             }
         })
 
-        viewModel.watchConnectAdb().observe(this) { isConnected ->
-            // Successfully connected to ADB, skip ahead
-            if (isConnected) {
-                restartMainActivity()
-            }
-        }
-        // Try auto-connecting
-        viewModel.autoConnect()
-        
         enableEdgeToEdge()
         setContent {
             Theme {
@@ -89,41 +95,56 @@ fun SlideshowScreen(
     viewModel: ConfigurationViewModel,
     onSlideshowComplete: () -> Unit,
 ) {
-    val allStates = AppState.valuesInOrder().filter { it != AppState.AdbConnected }
-    val permissionState by viewModel.configurationState.collectAsState()
+    val allStates = AppState.valuesInOrder().filter { it !in AppState.hiddenStates() }
+    val permissionState = viewModel.configurationState.collectAsStateWithLifecycle()
 
-    val pagerState = rememberPagerState(initialPage = 0, pageCount = { allStates.size })
+    // Initial page index (for the circle indicators at the top of the slideshow)
+    var initialPage = 0
+    val index: Int = allStates.indexOf(permissionState.value)
+    if (index in allStates.indices) {
+        initialPage = index
+    }
+
+    // pageCount = allStates.size - AppState.DeviceUnsupported
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { allStates.size - 1})
 
     val currentPage by remember { derivedStateOf { pagerState.currentPage } }
-    val coroutineScope = rememberCoroutineScope()
 
-    suspend fun updatePager(permissionState: AppState) {
-        val currentIndex = allStates.indexOf(permissionState)
+    // Leave flag to recheck state in onResume
+    var didLaunchSettings by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    suspend fun updatePager(state: AppState) {
+        Log.d(TAG, "updatePager to $state")
+        val currentIndex = allStates.indexOf(state)
         if (currentIndex in allStates.indices) {
             pagerState.animateScrollToPage(currentIndex)
-        } else if (permissionState == AppState.AdbConnected) {
+        } else if (state == AppState.AdbConnected) {
             onSlideshowComplete()
         }
     }
 
     // Skip screens already satisfied
-    LaunchedEffect(permissionState) {
-        updatePager(permissionState)
+    LaunchedEffect(permissionState.value) {
+        updatePager(permissionState.value)
     }
 
-    // todo: test onResume then remove this block
-//    val lifecycleOwner = LocalLifecycleOwner.current
-//    DisposableEffect(lifecycleOwner, currentPage) {
-//        val observer = LifecycleEventObserver { _, event ->
-//            if (event == Lifecycle.Event.ON_RESUME) {
-//                updatePager(permissionState)
-//            }
-//        }
-//        lifecycleOwner.lifecycle.addObserver(observer)
-//        onDispose {
-//            lifecycleOwner.lifecycle.removeObserver(observer)
-//        }
-//    }
+    // Re-check state when the user resumes the app
+    DisposableEffect(Unit) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && didLaunchSettings) {
+                Log.d(TAG, "OnResume with settings flag, checkUpdate")
+                viewModel.checkUpdateState()
+                didLaunchSettings = false
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -167,8 +188,15 @@ fun SlideshowScreen(
             val state = allStates[pageIndex]
             SlideshowPage(
                 state = state,
-                onClickContinue = { SlideshowManager::handleOnContinue }
-            ) // todo
+                onClickContinue = {
+                    Log.d(TAG, "onClickContinue with state $state")
+                    // Set flag to recalculate state in onResume
+                    if (state != AppState.NeedWelcomeScreen) {
+                        didLaunchSettings = true
+                    }
+                    viewModel.onChangeStateRequest(state)
+                }
+            )
         }
     }
 }
