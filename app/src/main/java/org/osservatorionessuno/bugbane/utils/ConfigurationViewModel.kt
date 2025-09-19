@@ -82,6 +82,7 @@ class ConfigurationViewModel private constructor(
             wifiConnectivityMonitor.wifiState.collect { isConnected ->
                 Log.d(TAG, "Wifi connectivity change, tell ADB manager")
                 adbManager.checkState()
+                checkUpdateState()
             }
         }
     }
@@ -94,7 +95,8 @@ class ConfigurationViewModel private constructor(
                     Log.d(TAG, "Try autoconnect")
                     adbManager.autoConnect()
                     hasTriedAutoConnect.store(true)
-                } else if (appState !in arrayOf(AppState.AdbConnecting, AppState.TryAutoConnect)) {
+                } else if (appState !in arrayOf(AppState.AdbConnecting, AppState.TryAutoConnect,
+                        AppState.NeedWirelessDebuggingAndPair)) {
                     hasTriedAutoConnect.store(false)
                 }
                 checkUpdateState()
