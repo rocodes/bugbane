@@ -35,11 +35,9 @@ object ConfigurationManager {
     }
 
     fun isWirelessDebuggingEnabled(context: Context): Boolean {
-        return try {            
-            val developerOptionsEnabled = isDeveloperOptionsEnabled(context)
-            val adbEnabled = isAdbEnabled(context)
-
-            developerOptionsEnabled && adbEnabled
+        return try {
+            // https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/core/java/android/provider/Settings.java;l=13465?q=adb_wifi_enabled&sq=&ss=android%2Fplatform%2Fsuperproject%2Fmain
+            Settings.Global.getInt(context.contentResolver, "adb_wifi_enabled", 0) == 1
         } catch (e: Exception) {
             Log.e("ConfigurationManager", "Error checking wireless debugging status", e)
             false

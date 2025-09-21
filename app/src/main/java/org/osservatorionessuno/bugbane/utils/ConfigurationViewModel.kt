@@ -120,7 +120,7 @@ class ConfigurationViewModel private constructor(
 
         // adbConnected -> we're connected, connected+scanning, or connected for the first time (connected finish onboarding).
         // Don't just rely on adb, since it's async and may lag to report its status
-        val isWirelessDebug = ConfigurationManager.isAdbEnabled(appContext) && isConnectedToWifi
+        val isWirelessDebug = ConfigurationManager.isWirelessDebuggingEnabled(appContext)
 
         if (isWirelessDebug && adbManager.adbState.value == AdbState.ConnectedIdle && !isOnboarding) return AppState.AdbConnected
         if (isWirelessDebug && adbManager.adbState.value == AdbState.ConnectedIdle && isOnboarding) return AppState.AdbConnectedFinishOnboarding
@@ -188,7 +188,7 @@ class ConfigurationViewModel private constructor(
             AppState.NeedNotificationConfiguration -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                 putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
             }
-            AppState.NeedDeveloperOptions -> Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)
+            AppState.NeedDeveloperOptions -> developerOptionsIntent()
             AppState.NeedWirelessDebuggingAndPair -> wirelessDebuggingIntent()
             AppState.AdbConnectedFinishOnboarding -> {
                 val restartIntent = Intent(appContext, MainActivity::class.java)
@@ -197,6 +197,7 @@ class ConfigurationViewModel private constructor(
             else -> null
         }
     }
+
     internal fun wirelessDebuggingIntent(): Intent {
         // Open wireless debugging settings
         val EXTRA_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
@@ -205,6 +206,20 @@ class ConfigurationViewModel private constructor(
             putExtra(EXTRA_FRAGMENT_ARG_KEY, "toggle_adb_wireless")
             val bundle = Bundle().apply {
                 putString(EXTRA_FRAGMENT_ARG_KEY, "toggle_adb_wireless")
+            }
+            putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, bundle)
+        }
+        return settingsIntent
+    }
+
+    internal fun developerOptionsIntent(): Intent {
+        // Open developer options settings, highlight build number
+        val EXTRA_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
+        val EXTRA_SHOW_FRAGMENT_ARGUMENTS = ":settings:show_fragment_args"
+        val settingsIntent = Intent(Settings.ACTION_DEVICE_INFO_SETTINGS).apply {
+            putExtra(EXTRA_FRAGMENT_ARG_KEY, "my_device_info_pref_screen")
+            val bundle = Bundle().apply {
+                putString(EXTRA_FRAGMENT_ARG_KEY, "build_number")
             }
             putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, bundle)
         }
