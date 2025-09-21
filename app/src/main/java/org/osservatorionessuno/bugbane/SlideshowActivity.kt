@@ -110,8 +110,6 @@ fun SlideshowScreen(
 
     val currentPage by remember { derivedStateOf { pagerState.currentPage } }
 
-    // Leave flag to recheck state in onResume
-    var didLaunchSettings by remember { mutableStateOf(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     suspend fun updatePager(state: AppState) {
@@ -132,10 +130,8 @@ fun SlideshowScreen(
     // Re-check state when the user resumes the app
     DisposableEffect(Unit) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && didLaunchSettings) {
-                Log.d(TAG, "OnResume with settings flag, checkUpdate")
+            if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.checkUpdateState()
-                didLaunchSettings = false
             }
         }
 
@@ -190,10 +186,6 @@ fun SlideshowScreen(
                 state = state,
                 onClickContinue = {
                     Log.d(TAG, "onClickContinue with state $state")
-                    // Set flag to recalculate state in onResume
-                    if (state != AppState.NeedWelcomeScreen) {
-                        didLaunchSettings = true
-                    }
                     viewModel.onChangeStateRequest(state)
                 }
             )
