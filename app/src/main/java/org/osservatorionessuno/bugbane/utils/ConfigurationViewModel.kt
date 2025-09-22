@@ -6,233 +6,276 @@ import android.content.Context
 import android.content.Intent
 import android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
 import android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
-import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import org.osservatorionessuno.bugbane.MainActivity
 import kotlin.concurrent.atomics.AtomicBoolean
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val TAG = "ConfigurationViewModel"
 
-/** ViewModel that holds and emits AppState, the overall state flow,
- * and manages transitions between states.
- * States are not inherently ordered or aware of their position in the StateFlow;
- * state flow is controlled via:
- *  ConfigurationViewModel::getState() (runs checks and returns current state)
- *  ConfiguationViewModel::checkUpdateState() (emits that value in a StateFlow), and
- *  ConfigurationViewModel::onChangeStateRequest() defines transition ("next")
- *  behaviour for each state.
+/** ViewModel that holds and emits AppState and manages transitions between states.
+ * States are not inherently ordered or aware of their position; ordering is managed
+ * via ConfigurationViewModel::getState() and ConfigurationViewModel::onChangeStateRequest()
+ * defines transition ("next") behaviour for each state.
+ *
+ * State-checking is done by manager classes and should happen async (coroutine) when possible.
+ * These managers implement listeners and must be registered and de-registered on cleanup.
  *
  * A single ConfigurationViewModel instance is used and is scoped to the application's
- * lifecycle (all Context references are to Application Context). This means the
- * ViewModel is responsible for registering and de-registering services/listeners.
+ * lifecycle (all Context references are to Application Context).
  */
 @OptIn(ExperimentalAtomicApi::class)
 class ConfigurationViewModel private constructor(
     val appContext: Context,
-    // adb state: needs pair, paired, scanning, etc
     val adbManager: AdbManager,
-    // wifi connectivity listener
     val wifiConnectivityMonitor: WifiConnectivityMonitor,
-    ) : ViewModel() {
+    val configurationManager: ConfigurationManager = ConfigurationManager,
+) : ViewModel() {
 
     // There Can Be Only One (see factory below)
     companion object {
         fun create(application: Application): ConfigurationViewModel {
+            val appContext = application.applicationContext
+            ConfigurationManager.initialize(appContext)
             return ConfigurationViewModel(
-                application.applicationContext,
-                AdbManager(application.applicationContext),
+                appContext,
+                AdbManager(appContext),
                 WifiConnectivityMonitor(application)
             )
         }
     }
 
-    // AppState is MutableFlow collected for UI listeners
+    // UI listeners collect AppState
     private val _configurationState = MutableStateFlow<AppState>(AppState.NeedWelcomeScreen)
     val configurationState: StateFlow<AppState> = _configurationState.asStateFlow()
 
     private val hasTriedAutoConnect = AtomicBoolean(false)
 
     init {
-        // Set up listeners for states that can affect AppState
-        observeAdbConfiguration()
-        observeWifiConnectivity()
+        observeCombinedState()
         observeAppState()
     }
-    internal fun observeAdbConfiguration() {
+
+    /**
+     * Merge all the stateflow objects and recalculate using checkState()
+     * when one of our components posts an update, then (synchronously)
+     * emit new AppState.
+     */
+    private fun observeCombinedState() {
         viewModelScope.launch {
-            // Use main checkUpdate method
-            adbManager.adbState.collect { adbState ->
-                checkUpdateState()
-            }
-        }
-    }
-    internal fun observeWifiConnectivity() {
-        viewModelScope.launch {
-            // Use main checkUpdate method
-            wifiConnectivityMonitor.wifiState.collect { isConnected ->
-                Log.d(TAG, "Wifi connectivity change, tell ADB manager")
-                adbManager.checkState()
-                checkUpdateState()
-            }
+            combine(
+                configurationManager.notificationsEnabled,
+                configurationManager.developerOptionsEnabled,
+                configurationManager.wirelessDebuggingEnabled,
+                wifiConnectivityMonitor.wifiState,
+                adbManager.adbState,
+                configurationManager.appProgress,
+            ) { values: Array<Any?> ->
+                // this is a pity, but we have over 9000 params and kotlin doesn't like it
+                val notifications = values[0] as Boolean
+                val devOpts = values[1] as Boolean
+                val wirelessDebug = values[2] as Boolean
+                val wifiConnected = values[3] as Boolean
+                val adbState = values[4] as AdbState
+                val appProgress = values[5] as ConfigurationManager.AppProgress
+                checkState(notifications,
+                    devOpts,
+                    wirelessDebug,
+                    wifiConnected,
+                    adbState,
+                    appProgress)
+            }.distinctUntilChanged()
+                .collect { newState ->
+                    Log.d(TAG, "New appState $newState")
+                    _configurationState.value = newState
+                }
         }
     }
 
-    // Handle transition states that should require no user interaction (autoconnect)
-    internal fun observeAppState() {
+    /**
+     * Determine the AppState - all requisites/state logic enforced here.
+     *
+     * If a user has completed the welcome screen, is connected to wifi and has an
+     * active adb wireless debugging connection, skip the other checks.
+     * If a user has previously connected to ADB, try to reconnect (autoconnect)
+     * as long as the pre-requisites are met. Otherwise, they will need pairing flow again.
+     *
+     * Check only: don't introduce side-effects here.
+     */
+    private fun checkState(
+        notificationsEnabled: Boolean,
+        developerOptionsEnabled: Boolean,
+        wirelessDebuggingEnabled: Boolean,
+        isConnectedToWifi: Boolean,
+        adbState: AdbState,
+        appProgress: ConfigurationManager.AppProgress,
+    ): AppState {
+        // TODO: This can be defined in the manifest if it's just about API level
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return AppState.DeviceUnsupported
+        if (!appProgress.hasSeenWelcomeScreen) return AppState.NeedWelcomeScreen
+
+        if (wirelessDebuggingEnabled) {
+            if (adbState == AdbState.ConnectedIdle && !appProgress.hasCompletedOnboarding) return AppState.AdbConnectedFinishOnboarding
+            if (adbState == AdbState.ConnectedIdle) return AppState.AdbConnected
+            if (adbState == AdbState.ConnectedAcquiring) return AppState.AdbScanning
+            if (adbState == AdbState.Connecting) return AppState.AdbConnecting
+
+            if (appProgress.hasCompletedOnboarding && !hasTriedAutoConnect.load()) return AppState.TryAutoConnect
+            // Wireless debugging is on, but our preconditions weren't met.
+            // Maybe we failed autoconnect, or maybe we're connecting for the first time and need to pair first.
+            Log.i(TAG, "checkState: wirelessDebug true, adbState $adbState, hasTriedAutoconnect=${hasTriedAutoConnect.load()}")
+        }
+
+        // We need to go through some part of the pairing flow again.
+        // (The order here informs the onboarding order)
+        if (!notificationsEnabled) return AppState.NeedNotificationConfiguration
+        if (!isConnectedToWifi) return AppState.NeedWifi
+        if (!developerOptionsEnabled) return AppState.NeedDeveloperOptions
+        if (!wirelessDebuggingEnabled && !appProgress.hasCompletedOnboarding) return AppState.NeedWirelessDebuggingAndPair
+
+        if (appProgress.hasCompletedOnboarding) {
+            // Wireless adb is off, but we've connected before. Enable wireless adb. Then autoconnect will be attempted.
+            Log.d(TAG, "Wireless adb is disabled, but we have previously connected successfully.")
+            return AppState.NeedWirelessDebugging
+        }
+
+        // We don't have a past connection, but nothing else is wrong. We can try autoconnect.
+        if (!hasTriedAutoConnect.load()) return AppState.TryAutoConnect
+
+        // We did not want to get here. That means no other conditions were met and autoconnect failed once.
+        Log.w(TAG, "checkState: default to re-pairing and debug connection logic.")
+        Log.d(TAG, "adbState=$adbState, notifications=$notificationsEnabled, wifi=$isConnectedToWifi, devOpts=$developerOptionsEnabled, has past adb connection=${appProgress.hasCompletedOnboarding}, tried autoconnect=${hasTriedAutoConnect.load()}")
+        return AppState.NeedWirelessDebuggingAndPair
+    }
+
+    /**
+     * Observe AppState and manage automatic state transitions here.
+     */
+    private fun observeAppState() {
         viewModelScope.launch {
             configurationState.collect { appState ->
                 if (appState == AppState.TryAutoConnect && !hasTriedAutoConnect.load()) {
-                    Log.d(TAG, "Try autoconnect")
+                    Log.d(TAG, "Attempting auto-connect to ADB")
                     adbManager.autoConnect()
                     hasTriedAutoConnect.store(true)
-                } else if (appState !in arrayOf(AppState.AdbConnecting, AppState.TryAutoConnect,
-                        AppState.NeedWirelessDebuggingAndPair)) {
+                } else if (appState !in arrayOf(
+                        AppState.AdbConnecting,
+                        AppState.TryAutoConnect,
+                        AppState.NeedWirelessDebugging,
+                    )
+                ) {
                     hasTriedAutoConnect.store(false)
                 }
-                checkUpdateState()
             }
         }
     }
 
-
-    internal fun checkState(): AppState {
-        // Get the "best" state - requisites/logic enforced here.
-        // If a user has completed the welcome screen, is connected to wifi and has an
-        // active adb connection, skip the other checks.
-        // If a user is missing one of those, they will need pairing flow again.
-        // Check only: don't introduce side-effects here.
-
-        // TODO: This can be defined in the manifest if it's just about API level
-        val isOnboarding = !SlideshowManager.hasSeenHomepage(appContext)
-        if (!ConfigurationManager.isSupportedDevice()) return AppState.DeviceUnsupported
-        if (!SlideshowManager.canSkipWelcomeScreen(appContext)) return AppState.NeedWelcomeScreen
-        val isConnectedToWifi = wifiConnectivityMonitor.wifiState.value
-
-        // adbConnected -> we're connected, connected+scanning, or connected for the first time (connected finish onboarding).
-        // Don't just rely on adb, since it's async and may lag to report its status
-        val isWirelessDebug = ConfigurationManager.isWirelessDebuggingEnabled(appContext)
-
-        if (isWirelessDebug && adbManager.adbState.value == AdbState.ConnectedIdle && !isOnboarding) return AppState.AdbConnected
-        if (isWirelessDebug && adbManager.adbState.value == AdbState.ConnectedIdle && isOnboarding) return AppState.AdbConnectedFinishOnboarding
-        if (isWirelessDebug && adbManager.adbState.value == AdbState.ConnectedAcquiring) return AppState.AdbScanning
-
-        // Are we trying to connect already?
-        if (adbManager.adbState.value == AdbState.Connecting) return AppState.AdbConnecting
-
-        // If we get here, we may need to go through the pairing workflow again, so ensure prereqs are met
-        if (!ConfigurationManager.isNotificationPermissionGranted(appContext)) return AppState.NeedNotificationConfiguration
-        if (!isConnectedToWifi) return AppState.NeedWifi
-        if (!ConfigurationManager.isDeveloperOptionsEnabled(appContext)) return AppState.NeedDeveloperOptions
-        if (!isWirelessDebug || hasTriedAutoConnect.load()) return AppState.NeedWirelessDebuggingAndPair
-
-        Log.d(TAG, "checkState: isAdbEnabled=${ConfigurationManager.isAdbEnabled(appContext)} adbManager ${adbManager.adbState.value}")
-        return AppState.TryAutoConnect
-    }
-
-    fun checkUpdateState() {
-        // StateFlow doesn't emit duplicates, so this is fine
-        val newState = checkState()
-        Log.d(TAG, "checkUpdateState: $newState")
-        _configurationState.value = newState
-    }
-
-    // Handle state transition (user-initiated)
     fun onChangeStateRequest(currentState: AppState) {
-        Log.d(TAG, "onChangeRequest from $currentState" )
+        Log.d(TAG, "onChangeRequest from $currentState")
         when (currentState) {
             AppState.DeviceUnsupported -> {
                 (appContext as? Activity)?.finishAffinity()
             }
+
             AppState.NeedWelcomeScreen -> {
-                // Clicked "I understand," nothing else to do
                 SlideshowManager.setHasSeenWelcomeScreen(appContext)
-                checkUpdateState()
             }
-            AppState.NeedWifi, AppState.NeedNotificationConfiguration, AppState.NeedDeveloperOptions -> {
-                getIntentForAppState(currentState)?.let { it ->
+
+            AppState.NeedWifi,
+            AppState.NeedNotificationConfiguration,
+            AppState.NeedDeveloperOptions -> {
+                getIntentForAppState(currentState)?.let {
                     it.addFlags(FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_CLEAR_TOP)
                     appContext.startActivity(it)
                 }
             }
+
             AppState.NeedWirelessDebuggingAndPair -> {
-                getIntentForAppState(currentState)?.let { it ->
+                getIntentForAppState(currentState)?.let {
                     it.addFlags(FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_CLEAR_TOP)
                     appContext.startActivity(it)
                 }
                 adbManager.startAdbPairingService()
             }
+            AppState.NeedWirelessDebugging -> {
+                // Just open settings, don't launch a new pairing service.
+                // Once wireless debugging is re-enabled the state will be updated and autoconnect will be attempted
+                getIntentForAppState(currentState)?.let {
+                    it.addFlags(FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_CLEAR_TOP)
+                    appContext.startActivity(it)
+                }
+            }
             AppState.AdbConnectedFinishOnboarding -> {
                 SlideshowManager.markHomepageAsSeen(appContext)
-                checkUpdateState()
             }
-            else -> { // Should be unreachable
+
+            else -> {
                 Log.w(TAG, "$currentState not handled by onChangeStateRequest")
             }
         }
     }
 
-
-    internal fun getIntentForAppState(state: AppState): Intent? {
+    private fun getIntentForAppState(state: AppState): Intent? {
         return when (state) {
             AppState.NeedWifi -> Intent(Settings.ACTION_WIFI_SETTINGS)
+
             AppState.NeedNotificationConfiguration -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                 putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
             }
+
             AppState.NeedDeveloperOptions -> developerOptionsIntent()
+
             AppState.NeedWirelessDebuggingAndPair -> wirelessDebuggingIntent()
-            AppState.AdbConnectedFinishOnboarding -> {
-                val restartIntent = Intent(appContext, MainActivity::class.java)
-                restartIntent.addFlags(FLAG_ACTIVITY_CLEAR_TOP)
+
+            AppState.AdbConnectedFinishOnboarding -> Intent(appContext, MainActivity::class.java).apply {
+                addFlags(FLAG_ACTIVITY_CLEAR_TOP)
             }
+
             else -> null
         }
     }
 
-    internal fun wirelessDebuggingIntent(): Intent {
-        // Open wireless debugging settings
+    private fun wirelessDebuggingIntent(): Intent {
         val EXTRA_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
         val EXTRA_SHOW_FRAGMENT_ARGUMENTS = ":settings:show_fragment_args"
-        val settingsIntent = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+
+        return Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
             putExtra(EXTRA_FRAGMENT_ARG_KEY, "toggle_adb_wireless")
-            val bundle = Bundle().apply {
+            putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, Bundle().apply {
                 putString(EXTRA_FRAGMENT_ARG_KEY, "toggle_adb_wireless")
-            }
-            putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, bundle)
+            })
         }
-        return settingsIntent
     }
 
-    internal fun developerOptionsIntent(): Intent {
-        // Open developer options settings, highlight build number
+    private fun developerOptionsIntent(): Intent {
         val EXTRA_FRAGMENT_ARG_KEY = ":settings:fragment_args_key"
         val EXTRA_SHOW_FRAGMENT_ARGUMENTS = ":settings:show_fragment_args"
-        val settingsIntent = Intent(Settings.ACTION_DEVICE_INFO_SETTINGS).apply {
+
+        return Intent(Settings.ACTION_DEVICE_INFO_SETTINGS).apply {
             putExtra(EXTRA_FRAGMENT_ARG_KEY, "my_device_info_pref_screen")
-            val bundle = Bundle().apply {
+            putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, Bundle().apply {
                 putString(EXTRA_FRAGMENT_ARG_KEY, "build_number")
-            }
-            putExtra(EXTRA_SHOW_FRAGMENT_ARGUMENTS, bundle)
+            })
         }
-        return settingsIntent
     }
+
+
 
     override fun onCleared() {
         super.onCleared()
-        // Unregister listeners/close sockets
         wifiConnectivityMonitor.cleanup()
         adbManager.cleanup()
+        configurationManager.cleanup()
     }
 }
+
 
 // Enforce singleton pattern with viewModel:
 // - We genuinely want to sync AppState across varying activities
