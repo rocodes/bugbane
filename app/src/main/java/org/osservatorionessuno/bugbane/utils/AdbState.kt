@@ -13,7 +13,7 @@ enum class AdbState(val index: Int) {
     Cancelled(5),
     ErrorConnect(6),
     ErrorAcquisition(7),
-    Unknown(8); // Initializing state
+    Initial(8); // Initializing state
 
     companion object {
 

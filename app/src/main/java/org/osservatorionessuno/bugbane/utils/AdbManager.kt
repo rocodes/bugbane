@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
-import android.widget.Toast
 import androidx.annotation.WorkerThread
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -30,7 +29,7 @@ private const val TAG = "AdbManager"
 
 class AdbManager(applicationContext: Context) {
     private val executor: ExecutorService = Executors.newFixedThreadPool(3)
-    private var _adbState = MutableStateFlow<AdbState>(AdbState.Unknown)
+    private var _adbState = MutableStateFlow<AdbState>(AdbState.Initial)
     val adbState: StateFlow<AdbState> = _adbState.asStateFlow()
 
     private val adbPairingReceiver =
@@ -124,7 +123,7 @@ class AdbManager(applicationContext: Context) {
         }
     }
 
-    fun checkState(): AdbState {
+    fun checkState(): AdbState? {
         Log.d(TAG, "Adb received request to re-evaluate state.")
         try {
             // connection isn't null, isConnected, connection is established
@@ -144,8 +143,8 @@ class AdbManager(applicationContext: Context) {
         } catch (e: Exception) {
             Log.d(TAG, "Couldn't get adbState: ${e.message}")
         }
-        Log.d(TAG, "manager reports unknown")
-        return AdbState.Unknown
+        Log.d(TAG, "State is unknown")
+        return null
     }
 
     @WorkerThread
