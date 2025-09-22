@@ -105,8 +105,8 @@ fun SlideshowScreen(
         initialPage = index
     }
 
-    // pageCount = allStates.size - AppState.DeviceUnsupported
-    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { allStates.size - 1})
+    // pageCount = allStates.size - hiddenStates
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { allStates.size - AppState.hiddenStates().size})
 
     val currentPage by remember { derivedStateOf { pagerState.currentPage } }
 
@@ -124,6 +124,7 @@ fun SlideshowScreen(
 
     // Skip screens already satisfied
     LaunchedEffect(permissionState.value) {
+        Log.d(TAG, "SlideSHowActivity got new state ${permissionState.value}")
         updatePager(permissionState.value)
     }
 
@@ -131,7 +132,8 @@ fun SlideshowScreen(
     DisposableEffect(Unit) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.checkUpdateState()
+                // todo
+                Log.d(TAG, "onResume [skip recalculating for now?]")
             }
         }
 
