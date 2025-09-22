@@ -60,7 +60,7 @@ fun getSlideshowScreenContent(state: AppState): SlideshowPageData {
             title = stringResource(R.string.slideshow_developer_title),
             description = stringResource(R.string.slideshow_developer_description),
             icon = Icons.Default.Settings,
-            buttonText = stringResource(R.string.slideshow_developer_button),
+            buttonText = stringResource(R.string.slideshow_button_text_enable),
         )
         AppState.AdbConnectedFinishOnboarding -> return SlideshowPageData(
             title = stringResource(R.string.slideshow_ready_title),
@@ -68,16 +68,26 @@ fun getSlideshowScreenContent(state: AppState): SlideshowPageData {
             icon = Icons.AutoMirrored.Filled.ArrowForward,
             buttonText = stringResource(R.string.slideshow_ready_button)
         )
-        AppState.NeedWirelessDebuggingAndPair, AppState.TryAutoConnect, AppState.AdbConnecting -> return SlideshowPageData(title = stringResource(R.string.slideshow_wireless_title),
+        AppState.NeedWirelessDebuggingAndPair -> return SlideshowPageData(title = stringResource(R.string.slideshow_wireless_and_pair_title),
+            description = stringResource(R.string.slideshow_wireless_and_pair_description),
+            icon = Icons.Filled.Build,
+            buttonText = stringResource(R.string.slideshow_wireless_and_pair_button),
+        )
+        AppState.TryAutoConnect, AppState.AdbConnecting -> return SlideshowPageData(title = stringResource(R.string.notification_channel_adb_pairing), //todo
+            description = stringResource(R.string.notification_adb_pairing_working_title),
+            icon = Icons.Filled.Build,
+            buttonText = "please wait", //todo
+        )
+        AppState.NeedWirelessDebugging -> return SlideshowPageData(title = stringResource(R.string.slideshow_wireless_title),
             description = stringResource(R.string.slideshow_wireless_description),
             icon = Icons.Filled.Build,
-            buttonText = if (state == AppState.NeedWirelessDebuggingAndPair) stringResource(R.string.slideshow_wireless_button) else stringResource(R.string.notification_adb_pairing_working_title),
+            buttonText = stringResource(R.string.slideshow_button_text_enable),
         )
         // Should be unreachable
-        else ->  return SlideshowPageData(title = stringResource(R.string.slideshow_wireless_title),
-            description = stringResource(R.string.slideshow_wireless_description),
+        else ->  return SlideshowPageData(title = stringResource(R.string.slideshow_wireless_and_pair_title),
+            description = stringResource(R.string.slideshow_wireless_and_pair_description),
             icon = Icons.Filled.Build,
-            buttonText = stringResource(R.string.slideshow_wireless_button),
+            buttonText = stringResource(R.string.slideshow_wireless_and_pair_button),
         )
     }
 }
