@@ -15,7 +15,8 @@ enum class AppState(val index: Int) {
     AdbConnecting(8),
     AdbScanning(9),
     AdbConnectionError(10),
-    DeviceUnsupported(11);
+    NeedWirelessDebugging(11),
+    DeviceUnsupported(12);
 
     companion object {
         fun valuesInOrder(): List<AppState> = listOf(
