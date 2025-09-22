@@ -51,8 +51,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             Theme {
                 val appState = configViewModel.configurationState.collectAsStateWithLifecycle()
+
+                val isOnboarding = !SlideshowManager.hasSeenHomepage(applicationContext)
                 LaunchedEffect(appState.value) {
-                    if (!SlideshowManager.hasSeenHomepage(applicationContext)) {
+                    if (isOnboarding) {
                         // Permissions slideshow
                         val startPage = AppState.valuesInOrder().indexOf(appState.value)
                         val intent = Intent(this@MainActivity, SlideshowActivity::class.java)
@@ -60,7 +62,12 @@ class MainActivity : ComponentActivity() {
                         startActivity(intent)
                     }
                 }
-                MainContent()
+                if (!isOnboarding) {
+                    MainContent()
+                } else {
+                    // Avoid flicker before the slideshow while compose is calculating the appstate
+                    Box(modifier = Modifier.fillMaxSize())
+                }
             }
         }
 
